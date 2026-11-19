@@ -18,6 +18,7 @@ public static class MeshKit
         r = Mathf.Min(r, Mathf.Min(H.x, Mathf.Min(H.y, H.z)) * 0.99f);
         var v = new List<Vector3>();
         var nrm = new List<Vector3>();
+        var uv = new List<Vector2>();
         var t = new List<int>();
 
         for (int a = 0; a < 3; a++)
@@ -38,8 +39,11 @@ public static class MeshKit
                             Mathf.Clamp(p.z, -(H.z - r), H.z - r));
                         Vector3 d = p - inner;
                         Vector3 n = d.sqrMagnitude < 1e-8f ? axis : d.normalized;
-                        v.Add(inner + n * r);
+                        Vector3 P = inner + n * r;
+                        v.Add(P);
                         nrm.Add(n);
+                        // UV metrda: yon tomon (z,y), tepa (x,z), old (x,y)
+                        uv.Add(a == 0 ? new Vector2(P.z * sgn, P.y) : a == 1 ? new Vector2(P.x, P.z) : new Vector2(-P.x * sgn, P.y));
                     }
                 int w = cc.Length;
                 for (int i = 0; i < cb.Length - 1; i++)
@@ -52,7 +56,7 @@ public static class MeshKit
             }
 
         var m = new Mesh();
-        m.SetVertices(v); m.SetNormals(nrm); m.SetTriangles(t, 0);
+        m.SetVertices(v); m.SetNormals(nrm); m.SetUVs(0, uv); m.SetTriangles(t, 0);
         m.RecalculateBounds();
         cache[key] = m;
         return m;
@@ -77,13 +81,22 @@ public static class MeshKit
     {
         if (cache.TryGetValue(key, out var cached)) return cached;
         var v = new List<Vector3>();
+        var uv = new List<Vector2>();
         var t = new List<int>();
+        // UV: u = aylana bo'ylab (eng katta radiusdagi metr), v = profil bo'ylab yoy uzunligi
+        float maxR = 0f, arc = 0f;
+        foreach (var p in prof) maxR = Mathf.Max(maxR, p.x);
+        float around = Mathf.Max(1f, Mathf.Round(maxR * Mathf.PI * 2f));
         for (int i = 0; i < prof.Length; i++)
+        {
+            if (i > 0) arc += Vector2.Distance(prof[i], prof[i - 1]);
             for (int j = 0; j <= segs; j++)
             {
                 float ang = j * Mathf.PI * 2f / segs;
                 v.Add(new Vector3(prof[i].x * Mathf.Cos(ang), prof[i].y, prof[i].x * Mathf.Sin(ang)));
+                uv.Add(new Vector2(j / (float)segs * around, arc));
             }
+        }
         int stride = segs + 1;
         for (int i = 0; i < prof.Length - 1; i++)
             for (int j = 0; j < segs; j++)
@@ -108,7 +121,7 @@ public static class MeshKit
             for (int q = 0; q < t.Count; q += 3) { int tmp = t[q + 1]; t[q + 1] = t[q + 2]; t[q + 2] = tmp; }
 
         var m = new Mesh();
-        m.SetVertices(v); m.SetTriangles(t, 0);
+        m.SetVertices(v); m.SetUVs(0, uv); m.SetTriangles(t, 0);
         m.RecalculateNormals();
         m.RecalculateBounds();
         cache[key] = m;
@@ -183,8 +196,10 @@ public static class MeshKit
         {
             t.Add(frontTris[i] + n); t.Add(frontTris[i + 2] + n); t.Add(frontTris[i + 1] + n);
         }
+        var uv = new List<Vector2>();
+        foreach (var p in vv) uv.Add(new Vector2(p.x, p.y));
         var m = new Mesh();
-        m.SetVertices(vv); m.SetNormals(nn); m.SetTriangles(t, 0);
+        m.SetVertices(vv); m.SetNormals(nn); m.SetUVs(0, uv); m.SetTriangles(t, 0);
         m.RecalculateBounds();
         cache[key] = m;
         return m;
@@ -232,5 +247,63 @@ public static class MeshKit
         {
             new Vector2(0.3f, 0), new Vector2(0.45f, 0.4f), new Vector2(0.3f, 0.9f), new Vector2(0.4f, 1.2f), new Vector2(0.2f, 1.2f)
         }, 12);
+    }
+
+    public static Mesh Barrel()
+    {
+        return Lathe("barrel", new[]
+        {
+            new Vector2(0.28f, 0), new Vector2(0.33f, 0.2f), new Vector2(0.35f, 0.42f), new Vector2(0.33f, 0.64f), new Vector2(0.28f, 0.84f), new Vector2(0.01f, 0.84f)
+        }, 14);
+    }
+
+    public static Mesh Cone()
+    {
+        return Lathe("cone", new[]
+        {
+            new Vector2(0.24f, 0), new Vector2(0.2f, 0.15f), new Vector2(0.04f, 0.7f), new Vector2(0.01f, 0.72f)
+        }, 12);
+    }
+
+    // Archa qavati: pastki tekis qism va konus (1 birlik, shkala bilan o'lchanadi)
+    public static Mesh PineTier()
+    {
+        return Lathe("pinetier", new[] { new Vector2(0.02f, 0), new Vector2(1f, 0.08f), new Vector2(0.01f, 1f) }, 9);
+    }
+
+    // Tog': past poligonli konus (1 birlik), qor qalpog'i alohida
+    public static Mesh Mountain()
+    {
+        return Lathe("mountain", new[]
+        {
+            new Vector2(1f, 0), new Vector2(0.86f, 0.22f), new Vector2(0.62f, 0.5f), new Vector2(0.36f, 0.78f), new Vector2(0.12f, 0.95f), new Vector2(0.01f, 1f)
+        }, 7);
+    }
+
+    public static Mesh SnowCap()
+    {
+        return Lathe("snowcap", new[]
+        {
+            new Vector2(0.43f, 0.71f), new Vector2(0.4f, 0.75f), new Vector2(0.15f, 0.955f), new Vector2(0.01f, 1.015f)
+        }, 7);
+    }
+
+    // Qal'a minorasi: pastga kengaygan dumaloq minora, tepasida chiqiq
+    public static Mesh FortTower()
+    {
+        return Lathe("forttower", new[]
+        {
+            new Vector2(1.15f, 0), new Vector2(0.92f, 0.86f), new Vector2(1.05f, 0.9f), new Vector2(1.05f, 1f), new Vector2(0.01f, 1f)
+        }, 16);
+    }
+
+    // Teleminora: ingichka ustun, o'rtada katta "kapsula", tepada igna (1 birlik balandlik)
+    public static Mesh TvTower()
+    {
+        return Lathe("tvtower", new[]
+        {
+            new Vector2(1.4f, 0), new Vector2(0.55f, 0.06f), new Vector2(0.32f, 0.5f), new Vector2(0.3f, 0.6f), new Vector2(1.1f, 0.63f),
+            new Vector2(1.2f, 0.67f), new Vector2(1.05f, 0.71f), new Vector2(0.24f, 0.73f), new Vector2(0.2f, 0.88f), new Vector2(0.06f, 0.9f), new Vector2(0.02f, 1f)
+        }, 16);
     }
 }

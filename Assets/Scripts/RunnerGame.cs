@@ -17,7 +17,7 @@ public class RunnerGame : MonoBehaviour
     const float LaneW = 2.5f;
     const float SegLen = 24f;
     const int SegCount = 7;
-    const float StartSpeed = 12f, MaxSpeed = 42f, Accel = 0.25f;
+    const float StartSpeed = 11f, MaxSpeed = 36f, Accel = 0.25f;
     const float StageLen = 400f; // har 400 metrda yangi bosqich
     const float Gravity = 28f, JumpSpeed = 10f, SlideTime = 0.7f;
 
@@ -162,21 +162,165 @@ public class RunnerGame : MonoBehaviour
     Vector2 swipeStart;
     bool swiping;
 
+    // ---------------- Ko'p o'yinchi (multiplayer) ----------------
+    // Har bir o'yinchining o'z "dunyosi" bor: RunnerGame ning alohida nusxasi (slot >= 0), X o'qida bir-biridan uzoqda turadi.
+    // slot = -1: oddiy bir kishilik o'yin (menyu, reklama, swipe boshqaruvi).
+    public int slot = -1;
+    public int worldCount = 1;
+    public PhonePlayer phone;                 // boshqaruvchi (telefon yoki klaviatura)
+    public System.Action<RunnerGame> OnDied;
+    public static readonly List<RunnerGame> Worlds = new List<RunnerGame>();
+    public static RunnerGame Solo;            // bir kishilik o'yin nusxasi (menyu shu yerda)
+    public bool IsMulti { get { return slot >= 0; } }
+    public bool IsDead { get { return dead; } }
+    public int ScoreValue { get { return CurrentScore(); } }
+    public int Stage { get { return stage; } }
+    public float StageProgress { get { return (z % StageLen) / StageLen; } }
+    public string PlayerName { get { return phone != null ? phone.name : "Player"; } }
+    Transform worldRoot;
+    Canvas canvas;
+    float suspendedMusicVol;
+
+    public const float WorldSpacing = 1000f; // kamera ko'rish masofasi (250) dan ancha katta: qo'shni dunyo ko'rinmaydi va chizilmaydi
+
+    public static int StyleCount { get { return Styles.Length; } }
+    public static string StyleName(int i) { return Styles[i].name; }
+    public static Color StyleTint(int i) { return Color.Lerp(Styles[i].top, Styles[i].accent, 0.35f); }
+    // Qahramon ko'rinishi (telefon va lobbi oldindan ko'rish uchun)
+    public class Look { public Color top, pants, shoe, hair, skin, hat, accent; public int head; public bool glasses, ponytail; }
+    public static Look StyleLook(int i)
+    {
+        var s = Styles[i];
+        return new Look { top = s.top, pants = s.pants, shoe = s.shoe, hair = s.hair, skin = s.skin, hat = s.hat, accent = s.accent, head = s.head, glasses = s.glasses, ponytail = s.ponytail };
+    }
+    // Zona: asosiy rang (bino/naqsh) va yer rangi
+    static readonly Color[] ZoneAccents = { new Color(0.12f, 0.36f, 0.78f), new Color(0.86f, 0.68f, 0.46f), new Color(0.35f, 0.58f, 0.28f), new Color(0.1f, 0.62f, 0.72f) };
+    static readonly Color[] ZoneGrounds = { new Color(0.82f, 0.72f, 0.56f), new Color(0.88f, 0.74f, 0.52f), new Color(0.45f, 0.66f, 0.32f), new Color(0.66f, 0.68f, 0.7f) };
+    public static Color ZoneAccent(int i) { return ZoneAccents[i % 4]; }
+    public static Color ZoneGround(int i) { return ZoneGrounds[i % 4]; }
+    // Kun vaqti: osmon tepasi va ufq ranglari
+    public static Color TimeTop(int i) { return Pals[i % Pals.Length].top; }
+    public static Color TimeHorizon(int i) { return Pals[i % Pals.Length].horizon; }
+
+    public static string StyleInfo(int i)
+    {
+        string[] heads = { "Cap", "Baseball cap", "Headband" };
+        var s = Styles[i];
+        return heads[Mathf.Clamp(s.head, 0, 2)] + (s.glasses ? " + glasses" : "") + (s.ponytail ? " + ponytail" : "");
+    }
+
+    // ---- Lobbi uchun 3D qahramon ko'rinishi: Start() ishlamaydigan (o'chirilgan) nusxa faqat modelni quradi ----
+    public static RunnerGame CreatePreviewBuilder()
+    {
+        var go = new GameObject("PreviewBuilder");
+        var g = go.AddComponent<RunnerGame>();
+        g.enabled = false; // Start() chaqirilmaydi: butun dunyo qurilmaydi
+        return g;
+    }
+
+    public void BuildPreview(int style, Transform parent)
+    {
+        styleIndex = Mathf.Clamp(style, 0, Styles.Length - 1);
+        body = new GameObject("Model").transform;
+        body.SetParent(parent, false);
+        BuildCharacter(body);
+        Prim(PrimitiveType.Cylinder, new Vector3(0, -0.04f, 0), new Vector3(1.5f, 0.04f, 1.5f), Gold, parent);
+        PreviewPose(0f);
+    }
+
+    public void PreviewPose(float t)
+    {
+        // model +Z ga qaraydi, kamera ham +Z da: 0 gradus = yuzi kameraga; -25 = biroz yonboshdan (3/4 ko'rinish)
+        body.localRotation = Quaternion.Euler(0, -25f + t * 40f, 0);
+        body.localPosition = new Vector3(0, Mathf.Sin(t * 2f) * 0.015f, 0);
+        body.localScale = new Vector3(0.9f, 0.9f, 0.9f);
+        upper.localRotation = Quaternion.identity;
+        legL.localRotation = legR.localRotation = kneeL.localRotation = kneeR.localRotation = Quaternion.identity;
+        armL.localRotation = Quaternion.Euler(-4f, 0, -7f);
+        armR.localRotation = Quaternion.Euler(4f, 0, 7f);
+        elbowL.localRotation = elbowR.localRotation = Quaternion.Euler(-14f, 0, 0);
+    }
+
+    // Bir kishilik o'yinni vaqtincha o'chirish (multiplayer ochilganda) va qaytarish
+    public void Suspend(bool on)
+    {
+        if (IsMulti) return;
+        if (canvas != null) canvas.gameObject.SetActive(!on);
+        if (cam != null) cam.gameObject.SetActive(!on);
+        if (music != null)
+        {
+            if (on) { suspendedMusicVol = music.volume; music.Pause(); }
+            else { music.volume = suspendedMusicVol > 0f ? suspendedMusicVol : 0.35f; music.UnPause(); }
+        }
+        enabled = !on;
+        if (!on)
+        {
+            Screen.orientation = ScreenOrientation.Portrait;
+            SetupAtmosphere();
+        }
+    }
+
+    // Eng oldinda ketayotgan tirik dunyo osmon va yorug'likni boshqaradi (atmosfera umumiy: bitta quyosh, bitta tuman)
+    static int leaderFrame = -1;
+    static RunnerGame leader;
+    bool OwnsAtmosphere()
+    {
+        if (!IsMulti) return true;
+        if (leaderFrame != Time.frameCount)
+        {
+            leaderFrame = Time.frameCount;
+            leader = null;
+            foreach (var w in Worlds)
+                if (w != null && (leader == null || (leader.dead && !w.dead) || (leader.dead == w.dead && w.z > leader.z))) leader = w;
+        }
+        return leader == this;
+    }
+
+    static Material sharedSky;
+
+    void OnDestroy()
+    {
+        Worlds.Remove(this);
+        if (Solo == this) Solo = null;
+        if (!IsMulti) return;
+        foreach (var s in segs) foreach (var mm in s.meshes) if (mm != null) Destroy(mm);
+        foreach (var m in mats.Values) if (m != null) Destroy(m);
+        if (worldRoot != null) Destroy(worldRoot.gameObject);
+        if (canvas != null) Destroy(canvas.gameObject);
+    }
+
     void Start()
     {
         Application.targetFrameRate = 60;
         QualitySettings.vSyncCount = 0;
         Screen.sleepTimeout = SleepTimeout.NeverSleep;
-        Screen.orientation = ScreenOrientation.Portrait;
+        if (!IsMulti) { Screen.orientation = ScreenOrientation.Portrait; Solo = this; ForcedZone = ForcedTime = -1; }
         best = PlayerPrefs.GetFloat("RoyalRunBest", 0);
 
-        cam = Camera.main;
-        if (cam == null)
+        worldRoot = new GameObject(IsMulti ? "World " + slot : "World").transform;
+        worldRoot.position = IsMulti ? new Vector3(WorldSpacing * (slot + 1), 0f, 0f) : Vector3.zero;
+
+        if (IsMulti)
         {
-            var c = new GameObject("Main Camera");
-            c.tag = "MainCamera";
+            Worlds.Add(this);
+            QualitySettings.shadowDistance = Mathf.Min(QualitySettings.shadowDistance, 45f); // har bir kamera uchun soya hisoblanadi
+            var c = new GameObject("Camera " + slot);
+            c.transform.SetParent(worldRoot, false);
             cam = c.AddComponent<Camera>();
-            c.AddComponent<AudioListener>();
+            cam.rect = new Rect(slot / (float)worldCount, 0f, 1f / worldCount, 1f);
+            var urp = c.AddComponent<UnityEngine.Rendering.Universal.UniversalAdditionalCameraData>();
+            urp.renderPostProcessing = true;
+        }
+        else
+        {
+            cam = Camera.main;
+            if (cam == null)
+            {
+                var c = new GameObject("Main Camera");
+                c.tag = "MainCamera";
+                cam = c.AddComponent<Camera>();
+                c.AddComponent<AudioListener>();
+            }
         }
         cam.clearFlags = CameraClearFlags.SolidColor;
         cam.backgroundColor = Pals[0].horizon;
@@ -192,18 +336,27 @@ public class RunnerGame : MonoBehaviour
 
         // o'yinchi
         player = new GameObject("Player").transform;
+        player.SetParent(worldRoot, false);
         body = new GameObject("Model").transform;
         body.SetParent(player, false);
-        styleIndex = Mathf.Clamp(PlayerPrefs.GetInt("RoyalRunStyle", 0), 0, Styles.Length - 1);
+        if (IsMulti) styleIndex = Mathf.Clamp(phone != null ? phone.character : slot, 0, Styles.Length - 1);
+        else styleIndex = Mathf.Clamp(PlayerPrefs.GetInt("RoyalRunStyle", 0), 0, Styles.Length - 1);
         BuildCharacter(body);
         bodyRenderers = body.GetComponentsInChildren<Renderer>();
 
         BuildAudio();
-        AdService.I.Init();
+        if (!IsMulti) AdService.I.Init();
         BuildUI();
         nextSegZ = -SegLen; // o'yinchi orqasida ham yo'l bo'lsin (menyu uchun)
         for (int i = 0; i <= SegCount; i++) SpawnSeg();
 
+        if (IsMulti)
+        {
+            menu = false;
+            SetHud(true);
+            UpdateCamera(true);
+            return;
+        }
         menu = !skipMenu;
         skipMenu = false;
         if (menu) { SetHud(false); MenuCamera(true); }
@@ -214,7 +367,7 @@ public class RunnerGame : MonoBehaviour
     {
         float dt = Time.deltaTime;
 
-        AdService.I.Tick(Time.unscaledDeltaTime);
+        if (!IsMulti) AdService.I.Tick(Time.unscaledDeltaTime);
 
         if (menu) { MenuUpdate(dt); return; }
 
@@ -224,6 +377,7 @@ public class RunnerGame : MonoBehaviour
         {
             ApplyShake();
             deadTime += dt;
+            if (IsMulti) return;
             if (adT > 0f)
             {
                 adT -= dt;
@@ -241,7 +395,7 @@ public class RunnerGame : MonoBehaviour
         HandleInput();
 
         // tezlik bosqichga qarab oshadi
-        float targetSpeed = Mathf.Min(MaxSpeed, StartSpeed + (stage - 1) * 4f + ((z % StageLen) / StageLen) * 2f);
+        float targetSpeed = Mathf.Min(MaxSpeed, StartSpeed + (stage - 1) * 3f + ((z % StageLen) / StageLen) * 1.5f);
         speed = Mathf.MoveTowards(speed, targetSpeed, 4f * dt);
         z += speed * dt;
         scoreF += speed * dt * stage * (x2T > 0f ? 2f : 1f);
@@ -267,7 +421,7 @@ public class RunnerGame : MonoBehaviour
         }
 
         float h = sliding ? 0.9f : 1.8f;
-        player.position = new Vector3(px, py, z);
+        player.localPosition = new Vector3(px, py, z);
         float sq = 1f + squash; // squash > 0: cho'zilish, < 0: yassilanish (hajm taxminan saqlanadi)
         float side = 1f / Mathf.Sqrt(Mathf.Max(0.3f, sq));
         body.localScale = new Vector3(0.9f * side, 0.9f * h / 1.8f * sq, 0.9f * side);
@@ -287,7 +441,7 @@ public class RunnerGame : MonoBehaviour
         {
             runT += dt * speed * 0.55f;
             float sn = Mathf.Sin(runT), cs = Mathf.Cos(runT);
-            if (sn * prevSn < 0f) stepSrc.PlayOneShot(cStep, 0.5f);
+            if (sn * prevSn < 0f && slot <= 0 && !RemoteAudio) stepSrc.PlayOneShot(cStep, 0.5f);
             prevSn = sn;
             thL = sn * 50f; thR = -sn * 50f;
             knL = Mathf.Max(0f, -cs) * 70f; knR = Mathf.Max(0f, cs) * 70f;
@@ -336,7 +490,7 @@ public class RunnerGame : MonoBehaviour
             {
                 if (p.taken) continue;
                 p.t.Rotate(0, 120f * dt, 0);
-                p.t.position = new Vector3(p.c.x, p.baseY + Mathf.Sin(Time.time * 3f + p.c.z) * 0.15f, p.c.z);
+                p.t.localPosition = new Vector3(p.c.x, p.baseY + Mathf.Sin(Time.time * 3f + p.c.z) * 0.15f, p.c.z);
                 if (Overlap(pc, ph, p.c, new Vector3(0.45f, 0.5f, 0.45f))) TakePickup(p);
             }
             foreach (var c in s.coins)
@@ -345,8 +499,8 @@ public class RunnerGame : MonoBehaviour
                 c.t.Rotate(0, 240f * dt, 0);
                 if (magnetT > 0f && c.c.z < z + 18f && c.c.z > z - 2f) // magnit: tangalar o'yinchiga uchib keladi
                 {
-                    Vector3 np = Vector3.MoveTowards(c.t.position, new Vector3(px, py + 1f, z), (speed + 22f) * dt);
-                    c.t.position = np;
+                    Vector3 np = Vector3.MoveTowards(c.t.localPosition, new Vector3(px, py + 1f, z), (speed + 22f) * dt);
+                    c.t.localPosition = np;
                     c.c = np;
                 }
                 if (Overlap(pc, ph, c.c, new Vector3(0.35f, 0.35f, 0.35f)))
@@ -358,8 +512,9 @@ public class RunnerGame : MonoBehaviour
                     scoreF += 10f * stage * (x2T > 0f ? 2f : 1f);
                     coinCombo = coinTimer > 0f ? coinCombo + 1 : 0;
                     coinTimer = 0.8f;
-                    coinSrc.pitch = Mathf.Min(1.7f, 1f + coinCombo * 0.06f);
-                    coinSrc.PlayOneShot(cCoin, 0.7f);
+                    float cp = Mathf.Min(1.7f, 1f + coinCombo * 0.06f);
+                    if (RemoteAudio) OnSfx(this, "coin", cp);
+                    else { coinSrc.pitch = cp; coinSrc.PlayOneShot(cCoin, 0.7f); }
                 }
             }
         }
@@ -388,6 +543,19 @@ public class RunnerGame : MonoBehaviour
         dead = true;
         deadTime = 0f;
         int sc = CurrentScore();
+        if (IsMulti)
+        {
+            origMats = new Material[bodyRenderers.Length];
+            var redMat = Mat(new Color(0.9f, 0.3f, 0.3f));
+            for (int i = 0; i < bodyRenderers.Length; i++) { origMats[i] = bodyRenderers[i].sharedMaterial; bodyRenderers[i].sharedMaterial = redMat; bodyRenderers[i].enabled = true; }
+            Sfx(cHit, 0.8f);
+            AddTrauma(0.85f);
+            Flash(0.55f);
+            dlgTxt.text = "CRASHED!\n\n" + PlayerName + "\nScore: " + sc + "\nCoins: " + coinCount;
+            dialog.SetActive(true);
+            if (OnDied != null) OnDied(this);
+            return;
+        }
         if (sc > best) { best = sc; PlayerPrefs.SetFloat("RoyalRunBest", best); PlayerPrefs.Save(); }
 
         origMats = new Material[bodyRenderers.Length];
@@ -492,8 +660,8 @@ public class RunnerGame : MonoBehaviour
         stage = n;
         Sfx(cLevel, 0.9f);
         bannerT = 2.5f;
-        bannerTxt.text = "BOSQICH " + n + "\n<size=64>" + ZoneNames[(n - 1) % 4] + "</size>";
-        music.pitch = Mathf.Min(1.25f, 1f + (stage - 1) * 0.04f); // musiqa ham tezlashadi
+        bannerTxt.text = "BOSQICH " + n + "\n<size=64>" + ZoneNames[ForcedZone >= 0 ? ForcedZone : (n - 1) % 4] + "</size>";
+        if (music != null) music.pitch = Mathf.Min(1.25f, 1f + (stage - 1) * 0.04f); // musiqa ham tezlashadi
     }
 
     void UpdateStageVisuals(float dt)
@@ -507,9 +675,9 @@ public class RunnerGame : MonoBehaviour
             float bt = Mathf.Clamp01((2.5f - bannerT) / 0.35f);
             bannerTxt.rectTransform.localScale = Vector3.one * Mathf.LerpUnclamped(0.4f, 1f, EaseOutBack(bt));
         }
-        int idx = (stage - 1) % Pals.Length; // kunduz -> quyosh botishi -> shom -> tun -> yana kunduz
+        int idx = TimeIndex(); // kunduz -> quyosh botishi -> shom -> tun -> yana kunduz (yoki ovoz bilan tanlangan)
         pal = Pal.Lerp(pal, Pals[idx], 0.6f * dt);
-        ApplyPalette();
+        if (OwnsAtmosphere()) ApplyPalette();
     }
 
     // ---------------- Atmosfera: osmon, tuman, yorug'lik, rang korreksiyasi ----------------
@@ -526,7 +694,8 @@ public class RunnerGame : MonoBehaviour
         var sh = Shader.Find("RoyalRun/Sky");
         if (sh != null)
         {
-            skyMat = new Material(sh);
+            if (sharedSky == null) sharedSky = new Material(sh); // hamma dunyolar bitta osmonni bo'lishadi
+            skyMat = sharedSky;
             skyMat.SetVector("_SunDir", new Vector4(0.35f, 0.12f, 1f, 0f));
             RenderSettings.skybox = skyMat;
             cam.clearFlags = CameraClearFlags.Skybox;
@@ -555,7 +724,7 @@ public class RunnerGame : MonoBehaviour
             }
         }
 
-        pal = Pals[0];
+        pal = Pals[TimeIndex()];
         ApplyPalette();
     }
 
@@ -587,11 +756,14 @@ public class RunnerGame : MonoBehaviour
         sfx = gameObject.AddComponent<AudioSource>();
         coinSrc = gameObject.AddComponent<AudioSource>();
         stepSrc = gameObject.AddComponent<AudioSource>();
-        music = gameObject.AddComponent<AudioSource>();
-        music.loop = true;
-        music.volume = 0.35f;
-        music.clip = MakeMusic();
-        music.Play();
+        if (!IsMulti) // ko'p o'yinchi rejimida musiqani MultiHost chaldiradi
+        {
+            music = gameObject.AddComponent<AudioSource>();
+            music.loop = true;
+            music.volume = 0.35f;
+            music.clip = MakeMusic();
+            music.Play();
+        }
 
         const float TAU = Mathf.PI * 2f;
 
@@ -653,6 +825,8 @@ public class RunnerGame : MonoBehaviour
     }
 
     // Fon musiqasi: Hijaz maqomida (D) 8 taktlik takrorlanuvchi motiv, bas va baraban bilan
+    public static AudioClip BuildMusicClip() { return MakeMusic(); }
+
     static AudioClip MakeMusic()
     {
         const int rate = 22050;
@@ -720,8 +894,30 @@ public class RunnerGame : MonoBehaviour
         }
     }
 
+    // Telefon boshqaruvchisi bo'lsa, tovush kompyuterda emas, telefonning o'zida chiqadi
+    public System.Action<RunnerGame, string, float> OnSfx;
+    bool RemoteAudio { get { return IsMulti && phone != null && !phone.isKeyboard && OnSfx != null; } }
+
+    string ClipName(AudioClip c)
+    {
+        if (c == cCoin) return "coin";
+        if (c == cJump) return "jump";
+        if (c == cSlide) return "slide";
+        if (c == cHit) return "hit";
+        if (c == cLane) return "lane";
+        if (c == cLevel) return "level";
+        if (c == cRevive) return "revive";
+        return null;
+    }
+
     void Sfx(AudioClip c, float vol)
     {
+        if (RemoteAudio)
+        {
+            string n = ClipName(c);
+            if (n != null) OnSfx(this, n, 1f);
+            return;
+        }
         if (c != null && sfx != null) sfx.PlayOneShot(c, vol);
     }
 
@@ -954,6 +1150,12 @@ public class RunnerGame : MonoBehaviour
         nameTxt.text = Styles[i].name;
     }
 
+    // Ko'p o'yinchi: telefonlar joystik bo'ladi, ekran bo'linadi (MultiHost lobbisi)
+    void OpenMultiplayer()
+    {
+        MultiHost.Open(this);
+    }
+
     void StartGame()
     {
         menu = false;
@@ -967,6 +1169,7 @@ public class RunnerGame : MonoBehaviour
     // ---------------- Boshqaruv ----------------
     void HandleInput()
     {
+        if (IsMulti && phone != null && !phone.isKeyboard) { HandlePhoneInput(); return; }
         var k = Keyboard.current;
         if (k != null)
         {
@@ -976,6 +1179,7 @@ public class RunnerGame : MonoBehaviour
             if (k.sKey.wasPressedThisFrame || k.downArrowKey.wasPressedThisFrame) Slide();
         }
 
+        if (IsMulti) return; // ko'p o'yinchi rejimida sichqoncha/swipe ishlamaydi
         var p = Pointer.current;
         if (p != null)
         {
@@ -996,6 +1200,27 @@ public class RunnerGame : MonoBehaviour
                 }
             }
             else if (!p.press.isPressed) swiping = false;
+        }
+    }
+
+    // Telefon joystigi: har bir yo'nalishga "tegish" bitta harakat beradi (qator, sakrash, sirg'anish).
+    // Keyingi harakat uchun joystikni markazga qaytarish kerak.
+    float lastPhoneLaneT = -1f;
+
+    void HandlePhoneInput()
+    {
+        while (phone.actions.Count > 0)
+        {
+            int a = phone.actions.Dequeue();
+            if (a <= 1)
+            {
+                // tarmoq kechikishidan bir nechta swipe yig'ilib kelsa, bir vaqtda ikki qator o'tib ketmasin
+                if (Time.unscaledTime - lastPhoneLaneT < 0.15f) continue;
+                lastPhoneLaneT = Time.unscaledTime;
+                ChangeLane(a == 0 ? -1 : 1);
+            }
+            else if (a == 2) Jump();
+            else Slide();
         }
     }
 
@@ -1040,9 +1265,10 @@ public class RunnerGame : MonoBehaviour
         float tanHalf = Mathf.Tan(30f * Mathf.Deg2Rad);
         float back = Mathf.Max(8f, 4.8f / (tanHalf * Mathf.Max(0.3f, cam.aspect)));
         float height = 4.6f + (back - 8f) * 0.5f;
-        Vector3 target = new Vector3(px * 0.6f, height, z - back);
+        Vector3 org = worldRoot.position;
+        Vector3 target = org + new Vector3(px * 0.6f, height, z - back);
         camBasePos = snap ? target : Vector3.Lerp(camBasePos, target, 10f * Time.deltaTime);
-        camBaseRot = Quaternion.LookRotation(new Vector3(px * 0.3f, 1.2f, z + 7f) - camBasePos);
+        camBaseRot = Quaternion.LookRotation(org + new Vector3(px * 0.3f, 1.2f, z + 7f) - camBasePos);
         ApplyShake();
     }
 
@@ -1205,6 +1431,7 @@ public class RunnerGame : MonoBehaviour
     {
         var s = new Seg { z = nextSegZ, root = new GameObject("Segment") };
         var tr = s.root.transform;
+        tr.SetParent(worldRoot, false);
         float mid = s.z + SegLen / 2f;
         int zone = ZoneAt(s.z);
 
@@ -1266,7 +1493,9 @@ public class RunnerGame : MonoBehaviour
         if (segIndex >= 3) // boshida bo'sh yo'l
         {
             Row(s, s.z + 6f);
-            Row(s, s.z + 18f);
+            // ikkinchi qator: boshida ba'zan tushib qoladi (nafas olish joyi), bosqich oshgan sari doim chiqadi
+            int stgRow = 1 + (int)(s.z / StageLen);
+            if (Random.value < Mathf.Min(1f, 0.45f + 0.2f * (stgRow - 1))) Row(s, s.z + 18f);
         }
 
         Combine(s); // yuzlab obyektni bitta meshga birlashtiramiz (telefon uchun tez)
@@ -1284,7 +1513,7 @@ public class RunnerGame : MonoBehaviour
             float x = (l - 1) * LaneW;
             if (l == safe)
             {
-                int r = Random.Range(0, 4);
+                int r = Random.Range(0, 6);   // xavfsiz yo'lda ko'proq tanga, kamroq to'siq
                 if (r == 0) AddObs(s, ObsType.Low, x, zz);
                 else if (r == 1) AddObs(s, ObsType.Overhead, x, zz);
                 else AddCoins(s, x, zz);
@@ -1292,11 +1521,11 @@ public class RunnerGame : MonoBehaviour
             else
             {
                 int stg = 1 + (int)(zz / StageLen);
-                int tallN = Mathf.Min(3, 2 + (stg - 1) / 2); // bosqich oshgan sari poyezdlar ko'payadi
-                int r = Random.Range(0, 5);
+                int tallN = Mathf.Min(3, 1 + (stg - 1) / 2); // bosqich oshgan sari poyezdlar sekin-asta ko'payadi
+                int r = Random.Range(0, 7);
                 if (r < tallN) AddObs(s, ObsType.Tall, x, zz);
-                else if (r == 2) AddObs(s, ObsType.Low, x, zz);
-                else if (r == 3) AddObs(s, ObsType.Overhead, x, zz);
+                else if (r == 3) AddObs(s, ObsType.Low, x, zz);
+                else if (r == 4) AddObs(s, ObsType.Overhead, x, zz);
             }
         }
     }
@@ -1411,8 +1640,8 @@ public class RunnerGame : MonoBehaviour
             Vector3 pos = new Vector3(x, 1f, zz + i * 2f);
             if (i == 0 && pk >= 0) { AddPickup(s, pos, pk); continue; }
             var holder = new GameObject("Coin").transform;
-            holder.SetParent(s.root.transform);
-            holder.position = pos;
+            holder.SetParent(s.root.transform, false);
+            holder.localPosition = pos;
             var edge = Prim(PrimitiveType.Cylinder, Vector3.zero, new Vector3(0.74f, 0.045f, 0.74f), Gold, holder);
             edge.GetComponent<MeshRenderer>().sharedMaterial = rim;
             edge.transform.localRotation = Quaternion.Euler(90, 0, 0);
@@ -1438,7 +1667,11 @@ public class RunnerGame : MonoBehaviour
     // ---------------- Hududlar: har bosqichda yangi joy ----------------
     // 0 Samarqand (kunduz), 1 Buxoro (quyosh botishi), 2 Tog'lar (shom), 3 Toshkent (tun) -- osmon palitrasi bilan mos
     static readonly string[] ZoneNames = { "SAMARQAND", "BUXORO", "TOG'LAR", "TOSHKENT" };
-    static int ZoneAt(float zz) { return ((int)(Mathf.Max(0f, zz) / StageLen)) % 4; }
+    // Ovoz berish natijasi (multiplayer): -1 = har 400 metrda almashadi (odatiy), 0..3 = shu zona/vaqt doim
+    public static int ForcedZone = -1, ForcedTime = -1;
+    public static string ZoneName(int i) { return ZoneNames[i % 4]; }
+    static int ZoneAt(float zz) { return ForcedZone >= 0 ? ForcedZone : ((int)(Mathf.Max(0f, zz) / StageLen)) % 4; }
+    int TimeIndex() { return ForcedTime >= 0 ? ForcedTime : (stage - 1) % Pals.Length; }
 
     void SideDressing(Transform tr, Seg s, int side, int zone, float mid)
     {
@@ -1745,9 +1978,9 @@ public class RunnerGame : MonoBehaviour
     void Vehicle(Seg s, Vector3 pos, int kind, float dir, float v)
     {
         var h = new GameObject("Mover").transform;
-        h.SetParent(s.root.transform);
-        h.position = pos;
-        h.rotation = Quaternion.Euler(0, dir > 0 ? 0 : 180, 0);
+        h.SetParent(s.root.transform, false);
+        h.localPosition = pos;
+        h.localRotation = Quaternion.Euler(0, dir > 0 ? 0 : 180, 0);
         var glass = MGlass();
         var tyre = C(0.08f, 0.08f, 0.09f);
         var head = MGlow(C(1f, 0.95f, 0.8f), 2.2f);
@@ -1819,8 +2052,8 @@ public class RunnerGame : MonoBehaviour
     void AddPickup(Seg s, Vector3 pos, int kind)
     {
         var holder = new GameObject("Coin").transform; // "Coin" nomi: Combine birlashtirmaydi
-        holder.SetParent(s.root.transform);
-        holder.position = pos;
+        holder.SetParent(s.root.transform, false);
+        holder.localPosition = pos;
         switch (kind)
         {
             case 0: // magnit: qizil taqa, oq uchlari
@@ -2406,8 +2639,19 @@ public class RunnerGame : MonoBehaviour
     void BuildUI()
     {
         var cv = new GameObject("UI").AddComponent<Canvas>();
-        cv.renderMode = RenderMode.ScreenSpaceOverlay;
-        cv.gameObject.AddComponent<GraphicRaycaster>(); // tugmalar bosilishi uchun shart
+        canvas = cv;
+        if (IsMulti)
+        {
+            // Har bir o'yinchining interfeysi o'z kamerasi maydoniga chiziladi (overlay URP da kamera chizig'iga kesiladi)
+            cv.renderMode = RenderMode.ScreenSpaceCamera;
+            cv.worldCamera = cam;
+            cv.planeDistance = 1f;
+        }
+        else
+        {
+            cv.renderMode = RenderMode.ScreenSpaceOverlay;
+            cv.gameObject.AddComponent<GraphicRaycaster>(); // tugmalar bosilishi uchun shart
+        }
         var sc = cv.gameObject.AddComponent<CanvasScaler>();
         sc.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
         sc.referenceResolution = new Vector2(1080, 1920);
@@ -2416,9 +2660,16 @@ public class RunnerGame : MonoBehaviour
         // telefon "chakka" (notch) va chetlaridan qochish uchun xavfsiz maydon
         var safe = new GameObject("SafeArea", typeof(RectTransform)).GetComponent<RectTransform>();
         safe.SetParent(cv.transform, false);
-        Rect sa = Screen.safeArea;
-        safe.anchorMin = new Vector2(sa.xMin / Screen.width, sa.yMin / Screen.height);
-        safe.anchorMax = new Vector2(sa.xMax / Screen.width, sa.yMax / Screen.height);
+        if (IsMulti)
+        {
+            safe.anchorMin = Vector2.zero; safe.anchorMax = Vector2.one;
+        }
+        else
+        {
+            Rect sa = Screen.safeArea;
+            safe.anchorMin = new Vector2(sa.xMin / Screen.width, sa.yMin / Screen.height);
+            safe.anchorMax = new Vector2(sa.xMax / Screen.width, sa.yMax / Screen.height);
+        }
         safe.offsetMin = safe.offsetMax = Vector2.zero;
         var ui = safe;
 
@@ -2427,10 +2678,25 @@ public class RunnerGame : MonoBehaviour
         bannerTxt.color = new Color(1f, 0.85f, 0.2f, 0f);
         bannerTxt.rectTransform.sizeDelta = new Vector2(1000, 200);
 
-        muteBtn = MakeButton2(ui, "Ovoz", new Vector2(1f, 1f), new Vector2(-40, -130), new Vector2(170, 80), new Color(0.15f, 0.55f, 0.25f), 36, ToggleMute);
-        muteLbl = muteBtn.GetComponentInChildren<Text>();
-        RefreshMute();
-        BuildMenu(ui);
+        if (IsMulti)
+        {
+            // o'yinchi yorlig'i (slot rangida)
+            var tag = MakeText(ui, "NameTag", new Vector2(0.5f, 0.965f), Vector2.zero, TextAnchor.MiddleCenter, 54);
+            tag.text = PlayerName.ToUpperInvariant() + " · " + Styles[styleIndex].name;
+            tag.color = PhoneHub.SlotColors[Mathf.Clamp(phone != null ? phone.slot : slot, 0, PhoneHub.SlotColors.Length - 1)];
+            tag.rectTransform.sizeDelta = new Vector2(1000, 90);
+            tag.gameObject.AddComponent<Outline>().effectColor = new Color(0f, 0f, 0f, 0.8f);
+            menuPanel = new GameObject("Menu", typeof(RectTransform)); // bo'sh (SetActive chaqiriladi)
+            menuPanel.transform.SetParent(ui, false);
+            menuPanel.SetActive(false);
+        }
+        else
+        {
+            muteBtn = MakeButton2(ui, "Ovoz", new Vector2(1f, 1f), new Vector2(-40, -130), new Vector2(170, 80), new Color(0.15f, 0.55f, 0.25f), 36, ToggleMute);
+            muteLbl = muteBtn.GetComponentInChildren<Text>();
+            RefreshMute();
+            BuildMenu(ui);
+        }
         var fl = MakePanel(cv.transform, "Flash", new Color(1f, 1f, 1f, 0f));
         flashImg = fl.GetComponent<Image>();
         flashImg.raycastTarget = false;
@@ -2438,11 +2704,29 @@ public class RunnerGame : MonoBehaviour
         BuildDialogs(cv.transform);
         hintTxt = MakeText(ui, "Hint", new Vector2(0.5f, 0.25f), Vector2.zero, TextAnchor.MiddleCenter, 48);
         hintTxt.rectTransform.sizeDelta = new Vector2(1000, 300);
-        hintTxt.text = "Chapga / o'ngga surish: qator almashtirish\nYuqoriga: sakrash    Pastga: sirg'anish";
+        hintTxt.text = IsMulti ? "" : "Chapga / o'ngga surish: qator almashtirish\nYuqoriga: sakrash    Pastga: sirg'anish";
     }
 
     void BuildDialogs(Transform root)
     {
+        if (IsMulti)
+        {
+            // ko'p o'yinchi: faqat "urildi" yozuvi (tugmalar va reklama yo'q)
+            dialog = MakePanel(root, "Dialog", new Color(0, 0, 0, 0.55f));
+            dlgTxt = MakeText(dialog.transform, "Title", new Vector2(0.5f, 0.5f), new Vector2(0, 100), TextAnchor.MiddleCenter, 64);
+            dlgTxt.rectTransform.sizeDelta = new Vector2(1000, 600);
+            dlgNote = MakeText(dialog.transform, "Note", new Vector2(0.5f, 0.5f), new Vector2(0, -400), TextAnchor.MiddleCenter, 36);
+            dlgNote.rectTransform.sizeDelta = new Vector2(1000, 80);
+            dialog.GetComponent<Image>().raycastTarget = false;
+            dialog.SetActive(false);
+            adPanel = new GameObject("AdPanel", typeof(RectTransform));
+            adPanel.transform.SetParent(root, false);
+            adTxt = MakeText(adPanel.transform, "AdText", Vector2.zero, Vector2.zero, TextAnchor.MiddleCenter, 10);
+            adPanel.SetActive(false);
+            contBtn = new GameObject("ContBtn");
+            contBtn.transform.SetParent(root, false);
+            return;
+        }
         // tugmalar ishlashi uchun EventSystem (yangi Input System bilan)
         var esys = FindAnyObjectByType<EventSystem>();
         if (esys == null) esys = new GameObject("EventSystem", typeof(EventSystem)).GetComponent<EventSystem>();
@@ -2545,6 +2829,7 @@ public class RunnerGame : MonoBehaviour
         MakeButton2(mt, "<", new Vector2(0.1f, 0.55f), Vector2.zero, new Vector2(150, 150), new Color(0.15f, 0.4f, 0.8f), 80, () => NextStyle(-1));
         MakeButton2(mt, ">", new Vector2(0.9f, 0.55f), Vector2.zero, new Vector2(150, 150), new Color(0.15f, 0.4f, 0.8f), 80, () => NextStyle(1));
         MakeButton2(mt, "O'YNASH", new Vector2(0.5f, 0.13f), Vector2.zero, new Vector2(760, 170), new Color(0.15f, 0.65f, 0.25f), 64, StartGame);
+        MakeButton2(mt, "KO'P O'YINCHI (2-3)", new Vector2(0.5f, 0.05f), Vector2.zero, new Vector2(760, 120), new Color(0.5f, 0.25f, 0.75f), 46, OpenMultiplayer);
 
         menuBestTxt = MakeText(mt, "Best", new Vector2(0.5f, 0.21f), Vector2.zero, TextAnchor.MiddleCenter, 48);
         menuBestTxt.text = "Rekord: " + (int)best;
